@@ -32,9 +32,9 @@ Changelog = "https://github.com/Aphoh/too-easy/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 dev = [
     "ruff",
-    "mypy>=1.0,<1.5",
-    "black>=23.0,<24.0",
-    "isort>=5.12,<5.13",
+    "mypy>=1.0,<1.10",
+    "black>=24.2,<25.0",
+    "isort>=5.13,<5.14",
     "pytest",
     "pytest-sphinx",
     "pytest-cov",
@@ -42,12 +42,12 @@ dev = [
     "build",
     "setuptools",
     "wheel",
-    "Sphinx>=4.3.0,<7.1.0",
-    "furo==2023.7.26",
+    "Sphinx>=4.3.0,<7.3.0",
+    "furo==2024.1.29",
     "myst-parser>=1.0,<2.1",
     "sphinx-copybutton==0.5.2",
     "sphinx-autobuild==2021.3.14",
-    "sphinx-autodoc-typehints==1.23.3",
+    "sphinx-autodoc-typehints==2.0.0",
     "packaging"
 ]
 
