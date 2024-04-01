@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 # See https://setuptools.pypa.io/en/latest/userguide/quickstart.html for more project configuration options.
-name = "my-package"
+name = "too-easy"
 dynamic = ["version"]
 readme = "README.md"
 classifiers = [
@@ -24,10 +24,10 @@ dependencies = [
 license = {file = "LICENSE"}
 
 [project.urls]
-Homepage = "https://github.com/allenai/python-package-template"
-Repository = "https://github.com/allenai/python-package-template"
-Changelog = "https://github.com/allenai/python-package-template/blob/main/CHANGELOG.md"
-# Documentation = "https://my-package.readthedocs.io/"
+Homepage = "https://github.com/Aphoh/too-easy"
+Repository = "https://github.com/Aphoh/too-easy"
+Changelog = "https://github.com/Aphoh/too-easy/blob/main/CHANGELOG.md"
+# Documentation = "https://too-easy.readthedocs.io/"
 
 [project.optional-dependencies]
 dev = [
@@ -65,10 +65,10 @@ exclude = [
 include-package-data = true
 
 [tool.setuptools.package-data]
-my_package = ["py.typed"]
+too_easy = ["py.typed"]
 
 [tool.setuptools.dynamic]
-version = {attr = "my_package.version.VERSION"}
+version = {attr = "too_easy.version.VERSION"}
 
 [tool.black]
 line-length = 100
@@ -85,6 +85,7 @@ exclude = '''
     | \bdoc\b
 )
 '''
+required_version = "23.12.1"
 
 [tool.isort]
 profile = "black"
