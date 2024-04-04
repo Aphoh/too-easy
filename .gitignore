@@ -30,6 +30,9 @@ pyrightconfig.json
 doc/_build/
 *.swp
 .DS_Store
+*.arrow
+*.zarr/
+long_c4_hq_samples/*
 
 
 # python
