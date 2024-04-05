@@ -44,7 +44,8 @@ class TensorStoreWriter:
                     "chunks": [1, self.total_samples, self.seq_len, self.dff],
                 },
             },
-            # create=True,
+            open=True,
+            create=True,
             shape=(self.layers, self.total_samples, self.seq_len, self.dff),
             dtype=getattr(ts, self.dtype),
         )

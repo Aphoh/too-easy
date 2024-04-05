@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 import torch
 
@@ -53,8 +53,10 @@ def get_base_model(model_name: str, dtype: str):
     return AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=getattr(torch, dtype))
 
 
-def get_instrumenter(model, fc1_pattern, num_layers) -> Instrumenter:
-    return Instrumenter(model, fc1_pattern, num_layers)
+def get_instrumenter(
+    model, pool: ThreadPoolExecutor, writer: TensorStoreWriter, fc1_pattern: str, num_layers: int
+) -> Instrumenter:
+    return Instrumenter(model, asyncio.get_event_loop(), pool, writer, fc1_pattern, num_layers)
 
 
 def get_num_layers(model):
@@ -140,28 +142,19 @@ async def main():
         model = model.to("mps")
 
     num_layers = get_num_layers(model)
-    instrumenter = get_instrumenter(model, args.fc1_pattern, num_layers)
-    instrumenter.instrument()
-    model.eval()
-    loop = asyncio.get_event_loop()
-    write_handles = []
-    with ThreadPoolExecutor() as pool:
+
+    with ProcessPoolExecutor() as pool:
+        instrumenter = get_instrumenter(model, pool, writer, args.fc1_pattern, num_layers)
+        instrumenter.instrument()
+        model.eval()
         with torch.inference_mode():
-            curr_batch_idx = 0
             for batch in tqdm(dataloader):
-                print(f"Computing batch {curr_batch_idx}")
-                i_batch_size = batch["input_ids"].shape[0]
+                n_samples = batch["input_ids"].shape[0]
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 _ = model(input_ids=input_ids, attention_mask=attention_mask)
-                writeables = instrumenter.pop_writeables()
-                for writeable in writeables:
-                    write_handles.append(
-                        loop.run_in_executor(pool, writeable.flush, curr_batch_idx, writer)
-                    )
-                curr_batch_idx += i_batch_size
-
-    await asyncio.gather(*write_handles)
+                instrumenter.step(n_samples)
+                await instrumenter.flush()
 
 
 if __name__ == "__main__":
