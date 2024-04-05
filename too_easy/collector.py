@@ -3,7 +3,7 @@ from too_easy.instrumenter import Instrumenter, Writeable
 from too_easy.tensor_writer import TensorStoreWriter
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
@@ -49,8 +49,10 @@ async def get_tensor_writer(model, output: Path, total_samples: int, dtype: str)
     return ts
 
 
-def get_base_model(model_name: str, dtype: str):
-    return AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=getattr(torch, dtype))
+def get_base_model(model_name: str, revision: str, dtype: str):
+    return AutoModelForCausalLM.from_config(
+        AutoConfig.from_pretrained(model_name, revision=revision), torch_dtype=getattr(torch, dtype)
+    )
 
 
 def get_instrumenter(
@@ -96,6 +98,9 @@ async def main():
         "--dset-split", default="data", type=str, help="The split of the dataset to use."
     )
     parser.add_argument("--model", type=str, required=True, help="The name of the model to use.")
+    parser.add_argument(
+        "--revision", type=str, default="main", help="The revision of the model to use."
+    )
     parser.add_argument("--fc1-pattern", type=str, help="The pattern for finding the fc1 layers.")
     parser.add_argument("--output-file", type=str, help="The file to write the output to.")
     parser.add_argument("--batch-size", default=8, type=int, help="batch size")
@@ -110,7 +115,8 @@ async def main():
     args = parser.parse_args()
     assert args.model is not None, "Please provide a model name."
 
-    model = get_base_model(args.model, args.dtype)
+    model = get_base_model(args.model, args.revision, args.dtype)
+    print("Model loaded with type ", next(iter(model.parameters())).dtype)
     out_path = Path(args.output_file)
     print("Outputting to ", out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
