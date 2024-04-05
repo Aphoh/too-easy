@@ -1,8 +1,13 @@
 import argparse
+from too_easy.instrumenter import Instrumenter, Writeable
+from too_easy.tensor_writer import TensorStoreWriter
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import torch
 
 
@@ -28,8 +33,28 @@ def get_dataloader(
     return DataLoader(dset, batch_size=batch_size)
 
 
-def get_base_model(model_name: str):
-    return AutoModelForCausalLM.from_pretrained(model_name)
+async def get_tensor_writer(model, output: Path, total_samples: int, dtype: str):
+    context_length = get_max_context_length(model)
+    num_layers = get_num_layers(model)
+    dff = get_dff(model)
+    ts = TensorStoreWriter(
+        path=output,
+        layers=num_layers,
+        total_samples=total_samples,
+        seq_len=context_length,
+        dff=dff,
+        dtype=dtype,
+    )
+    await ts.init_tensorstore()
+    return ts
+
+
+def get_base_model(model_name: str, dtype: str):
+    return AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=getattr(torch, dtype))
+
+
+def get_instrumenter(model, fc1_pattern, num_layers) -> Instrumenter:
+    return Instrumenter(model, fc1_pattern, num_layers)
 
 
 def get_num_layers(model):
@@ -41,6 +66,13 @@ def get_num_layers(model):
     raise ValueError("Cannot find the number of layers in the model")
 
 
+def get_dff(model):
+    cfg = model.config
+    if hasattr(cfg, "intermediate_size"):
+        return cfg.intermediate_size
+    raise ValueError("Cannot find the hidden size in the model")
+
+
 def get_max_context_length(model):
     cfg = model.config
     if hasattr(cfg, "max_position_embeddings"):
@@ -48,29 +80,7 @@ def get_max_context_length(model):
     raise ValueError("Cannot find the maximum context length in the model")
 
 
-def instrument(model, fc1_pattern: str, n_layers: int):
-    def fwd_hook(module, input, output):
-        in_d, out_d = input[0].shape[-1], output.shape[-1]
-        assert (in_d * 4 == out_d) or (in_d * 8 == out_d), "FC1 layer should 4x or 8x the input."
-        print("Forward hook called with:")
-        print("Input shape:", [a.shape for a in input])
-        print("Output shape:", output.shape)
-
-    left, right = fc1_pattern.split(".{}.")
-    lefts, rights = left.split("."), right.split(".")
-    module = model
-    for latt in lefts:
-        module = getattr(module, latt)
-
-    for i in range(n_layers):
-        i_module = module[i]
-        for ratt in rights:
-            i_module = getattr(i_module, ratt)
-        print("Registering hook for module", i_module)
-        i_module.register_forward_hook(fwd_hook)
-
-
-def main():
+async def main():
     parser = argparse.ArgumentParser(
         description="Process a Hugging Face dataset with a given model."
     )
@@ -78,7 +88,7 @@ def main():
         "--dset",
         type=str,
         default="mli-will/long-c4-hq-subset",
-        help="The name of the Hugging Face dataset to process.",
+        help="Hugging Face dataset to process.",
     )
     parser.add_argument(
         "--dset-split", default="data", type=str, help="The split of the dataset to use."
@@ -88,11 +98,23 @@ def main():
     parser.add_argument("--output-file", type=str, help="The file to write the output to.")
     parser.add_argument("--batch-size", default=8, type=int, help="batch size")
     parser.add_argument("--total-samples", default=32, type=int, help="total samples to process")
+    parser.add_argument(
+        "--dtype",
+        default="bfloat16",
+        type=str,
+        help="dtype to use. defaults to bfloat16.",
+    )
 
     args = parser.parse_args()
     assert args.model is not None, "Please provide a model name."
 
-    model = get_base_model(args.model)
+    model = get_base_model(args.model, args.dtype)
+    out_path = Path(args.output_file)
+    print("Outputting to ", out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = await get_tensor_writer(
+        model, Path(args.output_file), total_samples=args.total_samples, dtype=args.dtype
+    )
 
     context_length = get_max_context_length(model)
     dataloader = get_dataloader(
@@ -117,17 +139,30 @@ def main():
         device = "mps"
         model = model.to("mps")
 
-    # model = torch.compile(model) # we don't run long enough to compile
-
     num_layers = get_num_layers(model)
-    instrument(model, args.fc1_pattern, num_layers)
+    instrumenter = get_instrumenter(model, args.fc1_pattern, num_layers)
+    instrumenter.instrument()
     model.eval()
-    with torch.inference_mode():
-        for batch in tqdm(dataloader):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+    loop = asyncio.get_event_loop()
+    write_handles = []
+    with ThreadPoolExecutor() as pool:
+        with torch.inference_mode():
+            curr_batch_idx = 0
+            for batch in tqdm(dataloader):
+                print(f"Computing batch {curr_batch_idx}")
+                i_batch_size = batch["input_ids"].shape[0]
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                _ = model(input_ids=input_ids, attention_mask=attention_mask)
+                writeables = instrumenter.pop_writeables()
+                for writeable in writeables:
+                    write_handles.append(
+                        loop.run_in_executor(pool, writeable.flush, curr_batch_idx, writer)
+                    )
+                curr_batch_idx += i_batch_size
+
+    await asyncio.gather(*write_handles)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
