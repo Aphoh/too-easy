@@ -8,27 +8,27 @@ import asyncio
 
 
 class Writeable:
-    def __init__(self, sample_idx: int, layer: int, tensor: Tensor, stream):
+    def __init__(self, layer: int, tensor: Tensor, stream):
         assert isinstance(tensor, torch.Tensor)
         self.tensor = tensor
         self.stream = stream
         self.layer = layer
-        self.sample_idx = sample_idx
 
     def flush(self, writer: TensorStoreWriter):
         if torch.backends.mps.is_available():
             torch.mps.synchronize()
-        print(f"Writing {self.sample_idx} layer {self.layer}")
+        print(f"Writing layer {self.layer}")
         if isinstance(self.stream, torch.cuda.Stream):
             self.stream.synchronize()
 
-        writer.write_layer_tensor(self.layer, self.sample_idx, self.tensor)
+        writer.write_layer_tensor(self.layer, self.tensor)
 
 
 class Instrumenter:
     def __init__(
         self,
         model,
+        layer_transform: callable,
         loop: AbstractEventLoop,
         pool: ThreadPoolExecutor,
         writer: TensorStoreWriter,
@@ -38,11 +38,11 @@ class Instrumenter:
         self.model = model
         self.fc1_pattern = fc1_pattern
         self.n_layers = n_layers
+        self.layer_transform = layer_transform
         self.loop = loop
         self.pool = pool
         self.writer = writer
         self.write_handles = []
-        self.sample_idx = 0
         self._init_streams()
 
     def _init_streams(self):
@@ -52,7 +52,6 @@ class Instrumenter:
             self.streams = [None for _ in range(self.n_layers)]
 
     def step(self, n_samples: int):
-        self.sample_idx += n_samples
         self._init_streams()
 
     def _make_fwd_hook(self, layer: int):
@@ -66,7 +65,8 @@ class Instrumenter:
             if self.streams[layer]:
                 ctx = torch.cuda.stream(stream)
             with ctx:
-                w = Writeable(self.sample_idx, layer, output.to("cpu", non_blocking=True), stream)
+                output = self.layer_transform(output)
+                w = Writeable(layer, output.to("cpu", non_blocking=True), stream)
                 self.write_handles.append(
                     self.loop.run_in_executor(self.pool, w.flush, self.writer)
                 )

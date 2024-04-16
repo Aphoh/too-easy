@@ -1,5 +1,5 @@
 import argparse
-from too_easy.instrumenter import Instrumenter, Writeable
+from too_easy.instrumenter import Instrumenter
 from too_easy.tensor_writer import TensorStoreWriter
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -8,7 +8,9 @@ from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
+import torchist
 import torch
+import numpy as np
 
 
 def get_dataloader(
@@ -33,17 +35,12 @@ def get_dataloader(
     return DataLoader(dset, batch_size=batch_size)
 
 
-async def get_tensor_writer(model, output: Path, total_samples: int, dtype: str):
-    context_length = get_max_context_length(model)
+async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     num_layers = get_num_layers(model)
-    dff = get_dff(model)
     ts = TensorStoreWriter(
         path=output,
         layers=num_layers,
-        total_samples=total_samples,
-        seq_len=context_length,
-        dff=dff,
-        dtype=dtype,
+        bins=bins
     )
     await ts.init_tensorstore()
     return ts
@@ -54,11 +51,16 @@ def get_base_model(model_name: str, revision: str, dtype: str):
         AutoConfig.from_pretrained(model_name, revision=revision), torch_dtype=getattr(torch, dtype)
     )
 
+def histogram_transform(bins: torch.Tensor):
+    def closure(tensor: torch.Tensor):
+        return torchist.histogram(tensor, edges=bins)
+    return closure 
 
 def get_instrumenter(
-    model, pool: ThreadPoolExecutor, writer: TensorStoreWriter, fc1_pattern: str, num_layers: int
+    model, pool: ThreadPoolExecutor, writer: TensorStoreWriter, fc1_pattern: str, num_layers: int, bins: torch.Tensor,
 ) -> Instrumenter:
-    return Instrumenter(model, asyncio.get_event_loop(), pool, writer, fc1_pattern, num_layers)
+    transform = histogram_transform(bins)
+    return Instrumenter(model, transform, asyncio.get_event_loop(), pool, writer, fc1_pattern, num_layers)
 
 
 def get_num_layers(model):
@@ -68,13 +70,6 @@ def get_num_layers(model):
     if hasattr(cfg, "num_layers"):
         return cfg.num_layers
     raise ValueError("Cannot find the number of layers in the model")
-
-
-def get_dff(model):
-    cfg = model.config
-    if hasattr(cfg, "intermediate_size"):
-        return cfg.intermediate_size
-    raise ValueError("Cannot find the hidden size in the model")
 
 
 def get_max_context_length(model):
@@ -116,12 +111,15 @@ async def main():
     assert args.model is not None, "Please provide a model name."
 
     model = get_base_model(args.model, args.revision, args.dtype)
+    bins = torch.logspace(-8, np.log2(5), steps=250, dtype=torch.float32, base=2.0)
+    bins = torch.cat([-torch.flip(bins, (0,)), torch.tensor([0.0]), bins])
+    torch.save(bins, Path(args.output_file).parent / "bins.pt")
     print("Model loaded with type ", next(iter(model.parameters())).dtype)
     out_path = Path(args.output_file)
     print("Outputting to ", out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     writer = await get_tensor_writer(
-        model, Path(args.output_file), total_samples=args.total_samples, dtype=args.dtype
+        model, bins, output=Path(args.output_file),
     )
 
     context_length = get_max_context_length(model)
@@ -143,14 +141,14 @@ async def main():
     if torch.cuda.is_available():
         device = "cuda"
         model = model.cuda()
-    elif torch.backends.mps.is_available():
-        device = "mps"
-        model = model.to("mps")
+    #elif torch.backends.mps.is_available():
+    #    device = "mps"
+    #    model = model.to("mps")
 
     num_layers = get_num_layers(model)
 
-    with ProcessPoolExecutor() as pool:
-        instrumenter = get_instrumenter(model, pool, writer, args.fc1_pattern, num_layers)
+    with ThreadPoolExecutor() as pool:
+        instrumenter = get_instrumenter(model, pool, writer, args.fc1_pattern, num_layers, bins)
         instrumenter.instrument()
         model.eval()
         with torch.inference_mode():
@@ -160,7 +158,7 @@ async def main():
                 attention_mask = batch["attention_mask"].to(device)
                 _ = model(input_ids=input_ids, attention_mask=attention_mask)
                 instrumenter.step(n_samples)
-                await instrumenter.flush()
+            await instrumenter.flush()
 
 
 if __name__ == "__main__":
