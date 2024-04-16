@@ -6,3 +6,4 @@ transformers>=4.39.2
 datasets>=1.14.0
 dask>=2024.4.0
 matplotlib>=3.8.4
+torchist==0.2.3

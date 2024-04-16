@@ -18,7 +18,7 @@ def analyze_zarr(zarrs):
         zarr_arrs.append(da.from_zarr(file))
         name = Path(file).stem[4:]
         steps.append(int(name))
-    bins = torch.load(Path(zarrs).parent / "bins.pt").numpy()
+    bins = torch.load(Path(zarrs) / "bins.pt").numpy()
 
     output_arr = da.stack(zarr_arrs, axis=0)
 

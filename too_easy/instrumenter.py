@@ -17,7 +17,6 @@ class Writeable:
     def flush(self, writer: TensorStoreWriter):
         if torch.backends.mps.is_available():
             torch.mps.synchronize()
-        print(f"Writing layer {self.layer}")
         if isinstance(self.stream, torch.cuda.Stream):
             self.stream.synchronize()
 
