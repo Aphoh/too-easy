@@ -22,6 +22,8 @@ class Writeable:
             self.stream.synchronize()
 
         writer.write_layer_tensor(self.layer, self.tensor)
+        del self.tensor
+        del self.stream
 
 
 class Instrumenter:
