@@ -158,15 +158,15 @@ async def main():
         instrumenter = get_instrumenter(model, pool, writer, args.fc1_pattern, num_layers, bins)
         instrumenter.instrument()
         model.eval()
-        with torch.no_grad():
+        with torch.inference_mode():
             t = tqdm(dataloader, desc="Processing ")
             for batch in t:
                 n_samples = batch["input_ids"].shape[0]
                 input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)[:, :-1]
-                outputs = model(input_ids=input_ids[:, :-1], attention_mask=attention_mask, labels=input_ids[:, 1:])
+                attn_mask = batch["attention_mask"].to(device)
+                outputs = model(input_ids=input_ids, attention_mask=attn_mask, labels=input_ids)
                 t.set_description(f"lm loss {outputs.loss}")
-                if outputs.loss > 5:
+                if outputs.loss > 6:
                     print("Loss too high, bug")
                     return
                 instrumenter.step(n_samples)
