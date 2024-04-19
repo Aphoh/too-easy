@@ -1,10 +1,14 @@
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.data import DataLoader
-from datasets import load_dataset
+from datasets import load_dataset, VerificationMode
+import os
 import torch
 from functools import partial
 from tqdm import tqdm
+import time
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
 
 
 def tokenize_fn(tokenizer, text_field, context_length, x):
@@ -21,14 +25,9 @@ def tokenize_fn(tokenizer, text_field, context_length, x):
 
 
 def pad_sequence(context_length, text_field, x):
-    batch_size = len(x[text_field])
-    input_ids = torch.zeros(batch_size, context_length, dtype=torch.long)
-    labels = -100 * torch.ones(batch_size, context_length, dtype=torch.long)
-    for i, elem in enumerate(x[text_field]):
-        input_ids[i, : len(elem)] = elem
-        labels[i, : len(elem)] = elem
+    input_ids = torch.tensor(x[text_field], dtype=torch.int)
     attention_mask = torch.ones_like(input_ids)
-    return {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
+    return {"input_ids": input_ids, "labels": input_ids, "attention_mask": attention_mask}
 
 
 def get_dataloader(
@@ -39,11 +38,14 @@ def get_dataloader(
     batch_size: int,
     context_length: int,
     total_samples: int,
+    world_size: int,
     text_field="text",
 ):
     tokenizer.add_tokens("<custom padding>")
     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<custom padding>")
-    dset = load_dataset(dataset_name, split=split)
+    t = time.time() 
+    dset = load_dataset(dataset_name, split=split, verification_mode=VerificationMode.NO_CHECKS)
+    print(f"Took {time.time() - t} seconds to load data")
     if not already_tokenized:
         dset = dset.select(range(total_samples)).map(
             partial(tokenize_fn, tokenizer, text_field, context_length),
@@ -51,11 +53,16 @@ def get_dataloader(
             batched=True,
         )
     else:
+        pass
         dset = dset.select(range(total_samples)).map(
             partial(pad_sequence, context_length, text_field),
-            batched=True,
+            remove_columns=dset.column_names,
+            batched=False,
         )
     dset.set_format("torch")
+    if world_size > 1:
+        sampler = DistributedSampler(dset)
+        return DataLoader(dset, batch_size=batch_size, sampler=sampler)
     return DataLoader(dset, batch_size=batch_size)
 
 
@@ -103,16 +110,23 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype)
     )
+
+    rank = os.getenv("RANK", 0)
+    world_size = os.getenv("WORLD_SIZE", 1)
+    if world_size > 1 and torch.cuda.is_available():
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
     device = None
     if args.device:
         device = args.device
     else:
         device = "cpu"
         if torch.cuda.is_available():
-            device = "cuda"
+            device = "cuda:" + rank
         elif torch.backends.mps.is_available():
             device = "mps"
     model = model.to(device)
+    #model = torch.compile(model)
     loader = get_dataloader(
         args.dset,
         args.dset_split,
@@ -121,31 +135,31 @@ def main():
         args.batch_size,
         context_length,
         args.total_samples,
+        world_size=world_size,
         text_field=text_field,
     )
 
-    losses = []
-    num_samples = 0
-    for elem in tqdm(loader):
-        with torch.no_grad():
+    total_loss = torch.tensor(0.0, device=device)
+    num_samples = torch.tensor(0.0, device=device)
+    for elem in tqdm(loader, disable=rank != 0):
+        with torch.inference_mode():
             num_samples += elem["input_ids"].shape[0]
             outputs = model(**{k: v.to(device) for k, v in elem.items()})
-            loss = outputs.loss.cpu().item()
-            losses.append(loss)
+            total_loss += outputs.loss.float()
             if num_samples >= args.total_samples:
                 break
 
-    losses = torch.tensor(losses)
-    ppls = losses.exp()
-    mean_loss, std_loss = losses.mean().item(), losses.std().item()
-    mean_ppl, std_ppl = ppls.mean().item(), ppls.std().item()
-    print(f"Mean loss: {mean_loss}, std loss: {std_loss}")
-    print(f"Mean ppl: {mean_ppl}, std ppl: {std_ppl}")
+    if world_size > 1:
+        dist.all_reduce(total_loss)
+        dist.all_reduce(num_samples)
+    if rank == 1:
+        res = (total_loss / num_samples).cpu().item()
+        print("Mean loss: ", res.item())
 
-    with open(args.output_file, "w") as f:
-        f.write(
-            f"{args.model},{args.revision},{args.dset},{mean_loss},{std_loss},{mean_ppl},{std_ppl}\n"
-        )
+        with open(args.output_file, "a") as f:
+            f.write(
+                f"{args.model},{args.revision},{args.dset},{res}\n"
+            )
 
 
 if __name__ == "__main__":
