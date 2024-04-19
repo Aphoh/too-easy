@@ -25,7 +25,7 @@ def get_dataloader(
     dset = load_dataset(dataset_name, split=split)
     dset = dset.select(range(total_samples)).map(
         lambda x: tokenizer(
-            x[text_field], truncation=True, max_length=context_length+1, return_tensors="pt"
+            x[text_field], truncation=True, max_length=context_length + 1, return_tensors="pt"
         ),
         remove_columns=dset.column_names,
         batched=True,
@@ -36,17 +36,16 @@ def get_dataloader(
 
 async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     num_layers = get_num_layers(model)
-    ts = TensorStoreWriter(
-        path=output,
-        layers=num_layers,
-        bins=bins
-    )
+    ts = TensorStoreWriter(path=output, layers=num_layers, bins=bins)
     await ts.init_tensorstore()
     return ts
 
 
 def get_base_model(model_name: str, revision: str, dtype: str):
-    return AutoModelForCausalLM.from_pretrained(model_name, revision=revision, torch_dtype=getattr(torch, dtype))
+    return AutoModelForCausalLM.from_pretrained(
+        model_name, revision=revision, torch_dtype=getattr(torch, dtype)
+    )
+
 
 def histogram_transform(bins: torch.Tensor):
     def closure(tensor: torch.Tensor):
@@ -56,13 +55,22 @@ def histogram_transform(bins: torch.Tensor):
             print(e)
             return torch.zeros(bins.shape[0] - 1)
         return res
-    return closure 
+
+    return closure
+
 
 def get_instrumenter(
-    model, pool: ThreadPoolExecutor, writer: TensorStoreWriter, fc1_pattern: str, num_layers: int, bins: torch.Tensor,
+    model,
+    pool: ThreadPoolExecutor,
+    writer: TensorStoreWriter,
+    fc1_pattern: str,
+    num_layers: int,
+    bins: torch.Tensor,
 ) -> Instrumenter:
     transform = histogram_transform(bins)
-    return Instrumenter(model, transform, asyncio.get_event_loop(), pool, writer, fc1_pattern, num_layers)
+    return Instrumenter(
+        model, transform, asyncio.get_event_loop(), pool, writer, fc1_pattern, num_layers
+    )
 
 
 def get_num_layers(model):
@@ -115,7 +123,9 @@ async def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
     model = get_base_model(args.model, args.revision, args.dtype)
     print("Sample generation:")
-    print(tokenizer.decode(model.generate(**tokenizer("Hello, my name is ", return_tensors="pt"))[0]))
+    print(
+        tokenizer.decode(model.generate(**tokenizer("Hello, my name is ", return_tensors="pt"))[0])
+    )
     print("Model loaded with type ", next(iter(model.parameters())).dtype)
 
     out_path = Path(args.output_file)
@@ -126,7 +136,9 @@ async def main():
     bins = torch.cat([-torch.flip(bins, (0,)), torch.tensor([0.0]), bins])
     torch.save(bins, Path(args.output_file).parent / "bins.pt")
     writer = await get_tensor_writer(
-        model, bins, output=Path(args.output_file),
+        model,
+        bins,
+        output=Path(args.output_file),
     )
 
     context_length = get_max_context_length(model)

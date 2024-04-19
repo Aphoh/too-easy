@@ -30,12 +30,13 @@ def make_plots(dask_array, steps, bins):
     # Implement your function logic here
     # This is just a placeholder example
     b0_idx = np.where(bins == 0)[0][0]
-    gt0s = da.sum(dask_array[:, :, b0_idx:], axis=(1,2)) / da.sum(dask_array, axis=(1,2))
+    gt0s = da.sum(dask_array[:, :, b0_idx:], axis=(1, 2)) / da.sum(dask_array, axis=(1, 2))
     gt0s = gt0s.compute()
-    plt.plot(steps, gt0s, marker='o')
+    plt.plot(steps, gt0s, marker="o")
     plt.xlabel("Step")
     plt.ylabel("Fraction of values > 0")
     plt.savefig("output-gt0-steps.png")
+
 
 if __name__ == "__main__":
     analyze_zarr()

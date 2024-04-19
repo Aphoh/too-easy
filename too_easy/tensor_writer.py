@@ -5,9 +5,7 @@ import numpy as np
 
 
 class TensorStoreWriter:
-    def __init__(
-        self, path: Path, layers: int, bins: np.array
-    ):
+    def __init__(self, path: Path, layers: int, bins: np.array):
         """
         Initializes a TensorStoreWriter object to lazily write tensors to disk.
 
@@ -31,12 +29,12 @@ class TensorStoreWriter:
                 "driver": "zarr",
                 "kvstore": {"driver": "file", "path": str(self.path)},
                 "metadata": {
-                    "chunks": [self.layers, len(self.bins)-1],
+                    "chunks": [self.layers, len(self.bins) - 1],
                 },
             },
             open=True,
             create=True,
-            shape=(self.layers, len(self.bins)-1),
+            shape=(self.layers, len(self.bins) - 1),
             dtype=ts.int32,
         )
 
