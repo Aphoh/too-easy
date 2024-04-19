@@ -89,7 +89,7 @@ def main():
     )
     parser.add_argument("--output-file", type=str, help="The csv file to write the output to")
     parser.add_argument("--total-samples", default=32, type=int, help="total samples to process")
-    parser.add_argument("--batch-size", default=8, type=int, help="total samples to process")
+    parser.add_argument("--batch-size", default=None, type=int, help="total samples to process")
     parser.add_argument(
         "--dtype",
         default="float16",
@@ -127,6 +127,16 @@ def main():
             device = "mps"
     model = model.to(device)
     #model = torch.compile(model)
+    
+    if args.batch_size is None:
+        if "cuda" in device:
+            memory = torch.cuda.get_device_properties(0).total_memory
+            model_size = sum(p.numel() * p.element_size() for p in model.parameters())
+            args.batch_size = max(int(memory / (model_size * 1.5)), 1)
+            print("Setting batch size to ", args.batch_size)
+        else:
+            args.batch_size = 1
+
     loader = get_dataloader(
         args.dset,
         args.dset_split,
