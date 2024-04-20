@@ -125,10 +125,10 @@ def main():
         args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype)
     )
 
-    rank = os.getenv("RANK", 0)
-    world_size = os.getenv("WORLD_SIZE", 1)
+    rank = int(os.getenv("RANK", 0))
+    world_size = int(os.getenv("WORLD_SIZE", 1))
     if world_size > 1 and torch.cuda.is_available():
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
     device = None
     if args.device:
@@ -136,7 +136,7 @@ def main():
     else:
         device = "cpu"
         if torch.cuda.is_available():
-            device = "cuda:" + rank
+            device = f"cuda:{rank}"
         elif torch.backends.mps.is_available():
             device = "mps"
     model = model.to(device)
@@ -146,8 +146,9 @@ def main():
         if "cuda" in device:
             memory = torch.cuda.get_device_properties(0).total_memory
             model_size = sum(p.numel() * p.element_size() for p in model.parameters())
-            args.batch_size = max(int(memory / (model_size * 1.5)), 1)
-            print("Setting batch size to ", args.batch_size)
+            args.batch_size = max(int(memory / (model_size * 32)), 1)
+            if rank == 0:
+                print("Setting batch size to ", args.batch_size)
         else:
             args.batch_size = 1
 
@@ -165,11 +166,11 @@ def main():
         text_field=text_field,
     )
 
-    total_loss = torch.tensor(0.0, device=device)
-    num_samples = torch.tensor(0.0, device=device)
+    total_loss = torch.tensor(0.0, device="cpu")
+    num_samples = torch.tensor(0.0, device="cpu")
     for elem in tqdm(loader, disable=rank != 0):
         with torch.inference_mode():
-            num_samples += elem["input_ids"].shape[0]
+            num_samples += 1
             outputs = model(**{k: v.to(device) for k, v in elem.items()})
             total_loss += outputs.loss.float()
             if num_samples >= args.total_samples:
