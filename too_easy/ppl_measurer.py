@@ -121,8 +121,15 @@ def main():
         args.dset_save_path = args.dset.split("/")[-1]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    attn_impl = "eager"
+    try:
+        import flash_attn
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        print("Flash attention not found. Using default attention")
+        pass
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype)
+        args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype), attention_impl=attn_impl,
     )
 
     rank = int(os.getenv("RANK", 0))
@@ -140,6 +147,7 @@ def main():
         elif torch.backends.mps.is_available():
             device = "mps"
     model = model.to(device)
+    model.eval()
     #model = torch.compile(model)
     
     if args.batch_size is None:
@@ -167,25 +175,30 @@ def main():
     )
 
     total_loss = torch.tensor(0.0, device="cpu")
+    total_loss_sq = torch.tensor(0.0, device="cpu")
     num_samples = torch.tensor(0.0, device="cpu")
     for elem in tqdm(loader, disable=rank != 0):
         with torch.inference_mode():
             num_samples += 1
             outputs = model(**{k: v.to(device) for k, v in elem.items()})
-            total_loss += outputs.loss.cpu().float()
+            loss = outputs.loss.cpu().float()
+            total_loss += loss
+            total_loss_sq += loss ** 2
             if num_samples >= args.total_samples:
                 break
 
     if world_size > 1:
         dist.all_reduce(total_loss)
+        dist.all_reduce(total_loss_sq)
         dist.all_reduce(num_samples)
     if rank == 1:
         res = (total_loss / num_samples).cpu().item()
+        res2 = (total_loss_sq / num_samples).cpu().item()
         print("Mean loss: ", res)
 
         with open(args.output_file, "a") as f:
             f.write(
-                f"{args.model},{args.revision},{args.dset},{res}\n"
+                f"{args.model},{args.revision},{args.dset},{res},{res2}\n"
             )
 
 
