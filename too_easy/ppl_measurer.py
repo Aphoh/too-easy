@@ -1,13 +1,14 @@
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.data import DataLoader
-from datasets import load_dataset, VerificationMode
+from datasets import load_dataset, VerificationMode, load_from_disk
 import os
 import torch
 from functools import partial
 from tqdm import tqdm
 import time
 import torch.distributed as dist
+from pathlib import Path
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -32,34 +33,43 @@ def pad_sequence(context_length, text_field, x):
 
 def get_dataloader(
     dataset_name: str,
+    save_path: str,
     split: str,
     already_tokenized: bool,
     tokenizer: AutoTokenizer,
     batch_size: int,
     context_length: int,
     total_samples: int,
+    rank: int,
     world_size: int,
     text_field="text",
 ):
     tokenizer.add_tokens("<custom padding>")
     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<custom padding>")
     t = time.time() 
-    dset = load_dataset(dataset_name, split=split, verification_mode=VerificationMode.NO_CHECKS)
-    print(f"Took {time.time() - t} seconds to load data")
-    if not already_tokenized:
-        dset = dset.select(range(total_samples)).map(
-            partial(tokenize_fn, tokenizer, text_field, context_length),
-            remove_columns=dset.column_names,
-            batched=True,
-        )
+    if Path(save_path).exists():
+        dset = load_from_disk(save_path)
     else:
-        pass
-        dset = dset.select(range(total_samples)).map(
-            partial(pad_sequence, context_length, text_field),
-            remove_columns=dset.column_names,
-            batched=False,
-        )
-    dset.set_format("torch")
+        dset = load_dataset(dataset_name, split=split, verification_mode=VerificationMode.NO_CHECKS)
+        print(f"Took {time.time() - t} seconds to load data")
+        if not already_tokenized:
+            dset = dset.select(range(total_samples)).map(
+                partial(tokenize_fn, tokenizer, text_field, context_length),
+                remove_columns=dset.column_names,
+                batched=True,
+            )
+        else:
+            pass
+            dset = dset.select(range(total_samples)).map(
+                partial(pad_sequence, context_length, text_field),
+                remove_columns=dset.column_names,
+                batched=False,
+            )
+        if rank == 0:
+            print("Saving dataset to disk")
+            dset.save_to_disk(save_path) 
+        dset.set_format("torch")
+
     if world_size > 1:
         sampler = DistributedSampler(dset)
         return DataLoader(dset, batch_size=batch_size, sampler=sampler)
@@ -75,6 +85,7 @@ def main():
         default="stas/c4-en-10k",
         help="Hugging Face dataset to process.",
     )
+    parser.add_argument("--dset-save-path", type=str, help="Path to save the dataset to.")
     parser.add_argument(
         "--dset-already-tokenized",
         action="store_true",
@@ -105,6 +116,9 @@ def main():
         args.dset_already_tokenized = True
         context_length = 64
         text_field = "tokens"
+    
+    if args.dset_save_path is None:
+        args.dset_save_path = args.dset.split("/")[-1]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
@@ -139,12 +153,14 @@ def main():
 
     loader = get_dataloader(
         args.dset,
+        args.dset_save_path,
         args.dset_split,
         args.dset_already_tokenized,
         tokenizer,
         args.batch_size,
         context_length,
         args.total_samples,
+        rank,
         world_size=world_size,
         text_field=text_field,
     )
