@@ -68,8 +68,8 @@ def get_dataloader(
         if rank == 0:
             print("Saving dataset to disk")
             dset.save_to_disk(save_path) 
-        dset.set_format("torch")
 
+    dset.set_format("torch")
     if world_size > 1:
         sampler = DistributedSampler(dset)
         return DataLoader(dset, batch_size=batch_size, sampler=sampler)
@@ -172,7 +172,7 @@ def main():
         with torch.inference_mode():
             num_samples += 1
             outputs = model(**{k: v.to(device) for k, v in elem.items()})
-            total_loss += outputs.loss.float()
+            total_loss += outputs.loss.cpu().float()
             if num_samples >= args.total_samples:
                 break
 
@@ -181,7 +181,7 @@ def main():
         dist.all_reduce(num_samples)
     if rank == 1:
         res = (total_loss / num_samples).cpu().item()
-        print("Mean loss: ", res.item())
+        print("Mean loss: ", res)
 
         with open(args.output_file, "a") as f:
             f.write(
