@@ -129,7 +129,7 @@ def main():
         print("Flash attention not found. Using default attention")
         pass
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype), attention_impl=attn_impl,
+        args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype), attn_implementation=attn_impl,
     )
 
     rank = int(os.getenv("RANK", 0))
