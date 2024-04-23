@@ -20,20 +20,25 @@ def analyze_zarr(zarrs):
         steps.append(int(name))
     bins = torch.load(Path(zarrs) / "bins.pt").numpy()
 
-    output_arr = da.stack(zarr_arrs, axis=0)
+    by_step = sorted(zip(steps, zarr_arrs), key=lambda x: x[0])
+    steps, zarr_arrs = list(zip(*by_step))
 
     # Call your function on the Dask array
-    make_plots(output_arr, steps, bins)
+    make_plots(zarr_arrs, steps, bins)
 
 
 def make_plots(dask_array, steps, bins):
     # Implement your function logic here
     # This is just a placeholder example
     b0_idx = np.where(bins == 0)[0][0]
-    gt0s = da.sum(dask_array[:, :, b0_idx:], axis=(1, 2)) / da.sum(dask_array, axis=(1, 2))
-    gt0s = gt0s.compute()
+    gt0s = []
+    for arr in dask_array:
+        gt0s.append((da.sum(arr[:, b0_idx:]) / da.sum(arr)).compute())
+    #gt0s = da.sum(dask_array[:, :, b0_idx:], axis=(1, 2)) / da.sum(dask_array, axis=(1, 2))
+    #gt0s = gt0s.compute()
     plt.plot(steps, gt0s, marker="o")
     plt.xlabel("Step")
+    plt.xscale("log")
     plt.ylabel("Fraction of values > 0")
     plt.savefig("output-gt0-steps.png")
 

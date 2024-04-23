@@ -73,14 +73,22 @@ async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
 
 
 def get_base_model(model_name: str, revision: str, dtype: str):
+    attn_impl = "eager"
+    try:
+        import flash_attn
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        print("Flash attention not found. Using default attention")
+        pass
     return AutoModelForCausalLM.from_pretrained(
-        model_name, revision=revision, torch_dtype=getattr(torch, dtype)
+        model_name, revision=revision, torch_dtype=getattr(torch, dtype), attn_implementation=attn_impl
     )
 
 
 def histogram_transform(bins: torch.Tensor):
     def closure(tensor: torch.Tensor):
         try:
+            torch.cuda.synchronize(tensor.device)
             res = torchist.histogram(tensor, edges=bins)
         except Exception as e:
             print(e)
@@ -156,10 +164,6 @@ async def main():
 
     tokenizer = get_tokenizer(args.model, args.revision, use_fast=args.tokenizer_use_fast)
     model = get_base_model(args.model, args.revision, args.dtype)
-    print("Sample generation:")
-    print(
-        tokenizer.decode(model.generate(**tokenizer("Hello, my name is ", return_tensors="pt"))[0])
-    )
     print("Model loaded with type ", next(iter(model.parameters())).dtype)
 
     out_path = Path(args.output_file)
