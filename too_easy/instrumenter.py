@@ -82,7 +82,7 @@ class Instrumenter:
             module = getattr(module, latt)
 
         for i in range(self.n_layers):
-            i_module = module[i]
+            i_module: torch.nn.Module = module[i]
             for ratt in rights:
                 i_module = getattr(i_module, ratt)
             print("Registering hook for module", i_module)

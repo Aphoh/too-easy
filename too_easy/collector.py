@@ -1,9 +1,9 @@
 import argparse
 from too_easy.instrumenter import Instrumenter
 from too_easy.tensor_writer import TensorStoreWriter
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk, Dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, GPTNeoXForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
@@ -11,32 +11,63 @@ from pathlib import Path
 import torchist
 import torch
 import numpy as np
+from typing import Optional
+
+
+def get_tokenizer(model: str, revision: str, use_fast: bool = True):
+    if "opt" in model.lower() and use_fast:
+        print("Warning: Using fast tokenizer with OPT model, this may not work.")
+    return AutoTokenizer.from_pretrained(model, revision=revision, use_fast=use_fast)
 
 
 def get_dataloader(
     dataset_name: str,
+    cache_path: Optional[str],
     split: str,
     tokenizer: AutoTokenizer,
     batch_size: int,
     context_length: int,
     total_samples: int,
     text_field="text",
+    append_eod=False,
 ):
-    dset = load_dataset(dataset_name, split=split)
-    dset = dset.select(range(total_samples)).map(
-        lambda x: tokenizer(
-            x[text_field], truncation=True, max_length=context_length + 1, return_tensors="pt"
-        ),
-        remove_columns=dset.column_names,
-        batched=True,
-    )
+    if cache_path and Path(cache_path).exists():
+        dset = load_from_disk(cache_path)
+    else:
+        dset = load_dataset(dataset_name, split=split, streaming=True)
+        dset_iter = iter(dset)
+        rows = []
+        i = 0
+        for i in tqdm(range(total_samples), desc="Creating dataset rows"):
+            rows.append([])
+            no_data = False
+            while len(rows[i]) < context_length:
+                try:
+                    text = next(dset_iter)[text_field]
+                    input_ids = tokenizer(text, truncation=True, max_length=context_length)["input_ids"]
+                    if append_eod:
+                        input_ids.append(tokenizer.eos_token_id)
+                except StopIteration:
+                    print(f"WARN: Ran out of samples in the dataset! Got {len(rows)} rows")
+                    no_data = True
+                    break
+                rows[i].extend(input_ids)
+            if no_data:
+                break
+
+            rows[i] = rows[i][:context_length]
+        dset = Dataset.from_dict({"input_ids": rows})
+        if cache_path:
+            print("Saving dataset cache to disk at ", cache_path)
+            dset.save_to_disk(cache_path)
+
     dset.set_format("torch")
     return DataLoader(dset, batch_size=batch_size)
 
 
 async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     num_layers = get_num_layers(model)
-    ts = TensorStoreWriter(path=output, layers=num_layers, bins=bins)
+    ts = TensorStoreWriter(path=output, layers=num_layers, output_shape=(bins.shape[0] - 1,), output_dtype="uint32")
     await ts.init_tensorstore()
     return ts
 
@@ -102,6 +133,8 @@ async def main():
     parser.add_argument(
         "--dset-split", default="data", type=str, help="The split of the dataset to use."
     )
+    parser.add_argument("--dset-cache-path", type=str, default=None, help="The cache path for the dataset.")
+
     parser.add_argument("--model", type=str, required=True, help="The name of the model to use.")
     parser.add_argument(
         "--revision", type=str, default="main", help="The revision of the model to use."
@@ -116,11 +149,12 @@ async def main():
         type=str,
         help="dtype to use. defaults to bfloat16.",
     )
+    parser.add_argument("--tokenizer-no-fast", action="store_false", dest="tokenizer_use_fast", help="Use the fast tokenizer.")
 
     args = parser.parse_args()
     assert args.model is not None, "Please provide a model name."
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
+    tokenizer = get_tokenizer(args.model, args.revision, use_fast=args.tokenizer_use_fast)
     model = get_base_model(args.model, args.revision, args.dtype)
     print("Sample generation:")
     print(
@@ -144,6 +178,7 @@ async def main():
     context_length = get_max_context_length(model)
     dataloader = get_dataloader(
         args.dset,
+        args.dset_cache_path,
         args.dset_split,
         tokenizer,
         batch_size=args.batch_size,
@@ -160,9 +195,9 @@ async def main():
     if torch.cuda.is_available():
         device = "cuda"
         model = model.cuda()
-    elif torch.backends.mps.is_available():
-        device = "mps"
-        model = model.to("mps")
+    #elif torch.backends.mps.is_available():
+    #    device = "mps"
+    #    model = model.to("mps")
 
     num_layers = get_num_layers(model)
 
@@ -175,9 +210,12 @@ async def main():
             for batch in t:
                 n_samples = batch["input_ids"].shape[0]
                 input_ids = batch["input_ids"].to(device)
-                attn_mask = batch["attention_mask"].to(device)
+                if "attention_mask" not in batch:
+                    attn_mask = torch.ones_like(input_ids, device=device)
+                else:
+                    attn_mask = batch["attention_mask"].to(device)
                 outputs = model(input_ids=input_ids, attention_mask=attn_mask, labels=input_ids)
-                t.set_description(f"lm loss {outputs.loss}")
+                t.set_description(f"lm loss {outputs.loss:.2f}")
                 if outputs.loss > 6:
                     print("Loss too high, bug")
                     return
