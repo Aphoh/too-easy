@@ -4,6 +4,7 @@ import torch
 import contextlib
 from asyncio import AbstractEventLoop
 from concurrent.futures import ThreadPoolExecutor
+import torch.distributed as dist
 import asyncio
 
 
@@ -63,10 +64,13 @@ class Instrumenter:
                 ctx = torch.cuda.stream(stream)
             with ctx:
                 output = self.layer_transform(output)
-                w = Writeable(layer, output.to("cpu", non_blocking=True), stream)
-                self.write_handles.append(
-                    self.loop.run_in_executor(self.pool, w.flush, self.writer)
-                )
+                if dist.is_initialized():
+                    dist.all_reduce(output)
+                if not dist.is_initialized() or dist.get_rank() == 0:
+                    w = Writeable(layer, output.to("cpu", non_blocking=True), stream)
+                    self.write_handles.append(
+                        self.loop.run_in_executor(self.pool, w.flush, self.writer)
+                    )
 
         return i_fwd_hook
 

@@ -35,14 +35,12 @@ def make_plots(dask_array, xv, bins):
     gt0s = []
     for arr in dask_array:
         gt0s.append((da.sum(arr[:, b0_idx:]) / da.sum(arr)).compute())
-    #gt0s = da.sum(dask_array[:, :, b0_idx:], axis=(1, 2)) / da.sum(dask_array, axis=(1, 2))
-    #gt0s = gt0s.compute()
     plt.plot(xv, gt0s, marker="o")
     plt.xlabel("Model size")
     plt.xscale("log")
     plt.ylabel("Fraction of values > 0")
-    plt.show()
     plt.savefig("output-gt0-steps.png")
+    plt.show()
 
 
 if __name__ == "__main__":

@@ -3,13 +3,16 @@ from too_easy.instrumenter import Instrumenter
 from too_easy.tensor_writer import TensorStoreWriter
 from datasets import load_dataset, load_from_disk, Dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 import torchist
+import os
 import torch
+import torch.distributed as dist
 import numpy as np
 from typing import Optional
 
@@ -44,7 +47,9 @@ def get_dataloader(
             while len(rows[i]) < context_length:
                 try:
                     text = next(dset_iter)[text_field]
-                    input_ids = tokenizer(text, truncation=True, max_length=context_length, add_special_tokens=False)["input_ids"]
+                    input_ids = tokenizer(
+                        text, truncation=True, max_length=context_length, add_special_tokens=False
+                    )["input_ids"]
                     input_ids.insert(0, tokenizer.bos_token_id)
                     if append_eod:
                         input_ids.append(tokenizer.eos_token_id)
@@ -68,7 +73,9 @@ def get_dataloader(
 
 async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     num_layers = get_num_layers(model)
-    ts = TensorStoreWriter(path=output, layers=num_layers, output_shape=(bins.shape[0] - 1,), output_dtype="uint32")
+    ts = TensorStoreWriter(
+        path=output, layers=num_layers, output_shape=(bins.shape[0] - 1,), output_dtype="uint32"
+    )
     await ts.init_tensorstore()
     return ts
 
@@ -77,14 +84,19 @@ def get_base_model(model_name: str, revision: str, dtype: str):
     attn_impl = "eager"
     try:
         import flash_attn
+
         attn_impl = "flash_attention_2"
     except ImportError:
         print("Flash attention not found. Using default attention")
-        pass
-    return AutoModelForCausalLM.from_pretrained(
-        model_name, revision=revision, torch_dtype=getattr(torch, dtype), attn_implementation=attn_impl
-    )
 
+    dtype = getattr(torch, dtype)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        revision=revision,
+        attn_implementation=attn_impl,
+    ).to(dtype)
+
+    return model
 
 def histogram_transform(bins: torch.Tensor):
     def closure(tensor: torch.Tensor):
@@ -143,7 +155,9 @@ async def main():
     parser.add_argument(
         "--dset-split", default="data", type=str, help="The split of the dataset to use."
     )
-    parser.add_argument("--dset-cache-path", type=str, default=None, help="The cache path for the dataset.")
+    parser.add_argument(
+        "--dset-cache-path", type=str, default=None, help="The cache path for the dataset."
+    )
 
     parser.add_argument("--model", type=str, required=True, help="The name of the model to use.")
     parser.add_argument(
@@ -159,9 +173,30 @@ async def main():
         type=str,
         help="dtype to use. defaults to bfloat16.",
     )
-    parser.add_argument("--tokenizer-no-fast", action="store_false", dest="tokenizer_use_fast", help="Use the fast tokenizer.")
+    parser.add_argument(
+        "--tokenizer-no-fast",
+        action="store_false",
+        dest="tokenizer_use_fast",
+        help="Use the fast tokenizer.",
+    )
+
+    rank = 0
+    world_size = 1
+    device = torch.device("cpu")
+    if (rank := os.environ.get("RANK", None)) is not None:
+        rank = int(rank)
+        world_size = int(os.environ.get("WORLD_SIZE"))
+        local_rank = int(os.environ.get("LOCAL_RANK"))
+        torch.cuda.set_device(local_rank)
+        device = torch.cuda.current_device()
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    elif torch.cuda.is_available():
+        device = torch.cuda.current_device()
+
+
 
     args = parser.parse_args()
+    args.total_samples //= world_size
     assert args.model is not None, "Please provide a model name."
 
     tokenizer = get_tokenizer(args.model, args.revision, use_fast=args.tokenizer_use_fast)
@@ -197,13 +232,9 @@ async def main():
         print(model)
         return
 
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-        model = model.cuda()
-    #elif torch.backends.mps.is_available():
-    #    device = "mps"
-    #    model = model.to("mps")
+    model = model.to(device)
+    if dist.is_initialized():
+        model = FSDP(model)
 
     num_layers = get_num_layers(model)
 
@@ -212,7 +243,7 @@ async def main():
         instrumenter.instrument()
         model.eval()
         with torch.inference_mode():
-            t = tqdm(dataloader, desc="Processing ")
+            t = tqdm(dataloader, desc="Processing ", disable=(rank != 0))
             for batch in t:
                 n_samples = batch["input_ids"].shape[0]
                 input_ids = batch["input_ids"].to(device)
@@ -227,6 +258,9 @@ async def main():
                     return
                 instrumenter.step(n_samples)
             await instrumenter.flush()
+
+    if rank == 0:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
