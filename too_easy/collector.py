@@ -89,7 +89,8 @@ def get_base_model(model_name: str, revision: str, dtype: str):
 def histogram_transform(bins: torch.Tensor):
     def closure(tensor: torch.Tensor):
         try:
-            torch.cuda.synchronize(tensor.device)
+            if tensor.device.type == "cuda":
+                torch.cuda.synchronize(tensor.device)
             res = torchist.histogram(tensor, edges=bins)
         except Exception as e:
             print(e)
