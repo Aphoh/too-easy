@@ -62,8 +62,11 @@ def get_dataloader(
                 break
 
             rows[i] = rows[i][:context_length]
+        if dist.is_initialized():
+            dist.barrier()
+
         dset = Dataset.from_dict({"input_ids": rows})
-        if cache_path:
+        if cache_path and dist.get_rank() == 0:
             print("Saving dataset cache to disk at ", cache_path)
             dset.save_to_disk(cache_path)
 
