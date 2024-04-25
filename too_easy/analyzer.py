@@ -13,21 +13,22 @@ import numpy as np
 def analyze_zarr(zarrs):
     # Read the .zarr file into a Dask array
     zarr_arrs = []
-    steps = []
-    for file in glob.glob(zarrs + "/step*.zarr"):
+    xv = []
+    for file in glob.glob(zarrs + "/*.zarr"):
         zarr_arrs.append(da.from_zarr(file))
-        name = Path(file).stem[4:]
-        steps.append(int(name))
+        name = Path(file).stem
+        assert name[-1] == "m", "Expected 'm' as last character in name" 
+        xv.append(int(name[:-1]))
     bins = torch.load(Path(zarrs) / "bins.pt").numpy()
 
-    by_step = sorted(zip(steps, zarr_arrs), key=lambda x: x[0])
-    steps, zarr_arrs = list(zip(*by_step))
+    by_xv = sorted(zip(xv, zarr_arrs), key=lambda x: x[0])
+    xv, zarr_arrs = list(zip(*by_xv))
 
     # Call your function on the Dask array
-    make_plots(zarr_arrs, steps, bins)
+    make_plots(zarr_arrs, xv, bins)
 
 
-def make_plots(dask_array, steps, bins):
+def make_plots(dask_array, xv, bins):
     # Implement your function logic here
     # This is just a placeholder example
     b0_idx = np.where(bins == 0)[0][0]
@@ -36,10 +37,11 @@ def make_plots(dask_array, steps, bins):
         gt0s.append((da.sum(arr[:, b0_idx:]) / da.sum(arr)).compute())
     #gt0s = da.sum(dask_array[:, :, b0_idx:], axis=(1, 2)) / da.sum(dask_array, axis=(1, 2))
     #gt0s = gt0s.compute()
-    plt.plot(steps, gt0s, marker="o")
-    plt.xlabel("Step")
+    plt.plot(xv, gt0s, marker="o")
+    plt.xlabel("Model size")
     plt.xscale("log")
     plt.ylabel("Fraction of values > 0")
+    plt.show()
     plt.savefig("output-gt0-steps.png")
 
 

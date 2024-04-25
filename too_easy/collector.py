@@ -44,7 +44,8 @@ def get_dataloader(
             while len(rows[i]) < context_length:
                 try:
                     text = next(dset_iter)[text_field]
-                    input_ids = tokenizer(text, truncation=True, max_length=context_length)["input_ids"]
+                    input_ids = tokenizer(text, truncation=True, max_length=context_length, add_special_tokens=False)["input_ids"]
+                    input_ids.insert(0, tokenizer.bos_token_id)
                     if append_eod:
                         input_ids.append(tokenizer.eos_token_id)
                 except StopIteration:

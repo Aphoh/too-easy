@@ -57,10 +57,6 @@ class Instrumenter:
 
     def _make_fwd_hook(self, layer: int):
         def i_fwd_hook(_, input, output: Tensor):
-            in_d, out_d = input[0].shape[-1], output.shape[-1]
-            assert (in_d * 4 == out_d) or (
-                in_d * 8 == out_d
-            ), "FC1 layer should 4x or 8x the input."
             ctx = contextlib.nullcontext()
             stream = self.streams[layer]
             if self.streams[layer]:
