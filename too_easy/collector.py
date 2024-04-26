@@ -3,8 +3,15 @@ from too_easy.instrumenter import Instrumenter
 from too_easy.tensor_writer import TensorStoreWriter
 from datasets import load_dataset, load_from_disk, Dataset
 from torch.utils.data import DataLoader
+from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
+import json
+import safetensors.torch as sttorch
+import psutil
+from accelerate import init_empty_weights
+from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, CPUOffload
 from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
@@ -16,10 +23,17 @@ import torch.distributed as dist
 import numpy as np
 from typing import Optional
 
+def get_rank():
+    return dist.get_rank() if dist.is_initialized() else 0
+
+def print_rank_0(*args, **kwargs):
+    if get_rank() == 0:
+        mem = psutil.virtual_memory()[2]
+        print(f"CPU: {mem}%", *args, **kwargs)
 
 def get_tokenizer(model: str, revision: str, use_fast: bool = True):
     if "opt" in model.lower() and use_fast:
-        print("Warning: Using fast tokenizer with OPT model, this may not work.")
+        print_rank_0("Warning: Using fast tokenizer with OPT model, this may not work.")
     return AutoTokenizer.from_pretrained(model, revision=revision, use_fast=use_fast)
 
 
@@ -34,9 +48,8 @@ def get_dataloader(
     text_field="text",
     append_eod=False,
 ):
-    if cache_path and Path(cache_path).exists():
-        dset = load_from_disk(cache_path)
-    else:
+    dset = None
+    if get_rank() == 0 and (not cache_path or (cache_path and not Path(cache_path).exists())):
         dset = load_dataset(dataset_name, split=split, streaming=True)
         dset_iter = iter(dset)
         rows = []
@@ -54,23 +67,29 @@ def get_dataloader(
                     if append_eod:
                         input_ids.append(tokenizer.eos_token_id)
                 except StopIteration:
-                    print(f"WARN: Ran out of samples in the dataset! Got {len(rows)} rows")
+                    print_rank_0(f"WARN: Ran out of samples in the dataset! Got {len(rows)} rows")
                     no_data = True
                     break
                 rows[i].extend(input_ids)
+            rows[i] = rows[i][:context_length]
             if no_data:
                 break
 
-            rows[i] = rows[i][:context_length]
-        if dist.is_initialized():
-            dist.barrier()
-
         dset = Dataset.from_dict({"input_ids": rows})
-        if cache_path and dist.get_rank() == 0:
-            print("Saving dataset cache to disk at ", cache_path)
+        if cache_path:
             dset.save_to_disk(cache_path)
 
+    if dist.is_initialized(): 
+        dist.barrier()
+
+    if dset is None:
+        assert cache_path and Path(cache_path).exists()
+        dset = load_from_disk(cache_path)
+
+    assert len(dset) == total_samples, "Dataset length does not match the requested length."
     dset.set_format("torch")
+    if dist.is_initialized():
+        return DataLoader(dset, batch_size=batch_size, sampler=DistributedSampler(dset, shuffle=False))
     return DataLoader(dset, batch_size=batch_size)
 
 
@@ -82,6 +101,46 @@ async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     await ts.init_tensorstore()
     return ts
 
+def try_get_file(
+    repo_id: str,
+    filename: str,
+    revision: str,
+    cache_dir: str,
+) -> bool:
+    try:
+        res = hf_hub_download(repo_id, filename, revision=revision, cache_dir=cache_dir)
+        return res
+    except (EntryNotFoundError, LocalEntryNotFoundError):
+        return None
+
+def load_state_dict(repo, revision, hf_cache_dir):
+    weight_files = []
+    for path in ["model.safetensors", "pytorch_model.bin"]:
+        if (file := try_get_file(repo, path, revision=revision, cache_dir=hf_cache_dir)) is not None:
+            weight_files.append(file)
+            break
+        elif (file := try_get_file(
+            repo, path + ".index.json", revision=revision, cache_dir=hf_cache_dir
+        )):
+            index_contents = json.load(open(file))
+            paths = list(set(index_contents["weight_map"].values()))
+            for path in paths:
+                weight_files.append(
+                    hf_hub_download(repo, path, revision=revision, cache_dir=hf_cache_dir)
+                )
+            break
+    else:
+        raise ValueError("No checkpoint files found!")
+
+    state_dict = {}
+    for weight_file in weight_files:
+        if weight_file.endswith(".safetensors"):
+            state_dict |= sttorch.load_file(weight_file, device="cpu")
+        else:
+            assert weight_file.endswith(".bin")
+            state_dict |= torch.load(weight_file, map_location="cpu")
+
+    return state_dict
 
 def get_base_model(model_name: str, revision: str, dtype: str):
     attn_impl = "eager"
@@ -90,16 +149,22 @@ def get_base_model(model_name: str, revision: str, dtype: str):
 
         attn_impl = "flash_attention_2"
     except ImportError:
-        print("Flash attention not found. Using default attention")
+        print_rank_0("Flash attention not found. Using default attention")
 
+    kwargs = {
+        "pretrained_model_name_or_path": model_name,
+        "revision": revision,
+        "attn_implementation": attn_impl,
+        "torch_dtype": getattr(torch, dtype),
+        "device_map": "auto",
+    }
     dtype = getattr(torch, dtype)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        revision=revision,
-        attn_implementation=attn_impl,
-    ).to(dtype)
+    if get_rank() == 0:
+        return AutoModelForCausalLM.from_pretrained(**kwargs).to(dtype)
+    with init_empty_weights():
+        config = AutoConfig.from_pretrained(**kwargs)
+        return AutoModelForCausalLM.from_config(config).to(dtype) # huggingface is a dirty liar
 
-    return model
 
 def histogram_transform(bins: torch.Tensor):
     def closure(tensor: torch.Tensor):
@@ -108,7 +173,7 @@ def histogram_transform(bins: torch.Tensor):
                 torch.cuda.synchronize(tensor.device)
             res = torchist.histogram(tensor, edges=bins)
         except Exception as e:
-            print(e)
+            print_rank_0(e)
             return torch.zeros(bins.shape[0] - 1)
         return res
 
@@ -196,23 +261,22 @@ async def main():
     elif torch.cuda.is_available():
         device = torch.cuda.current_device()
 
-
-
     args = parser.parse_args()
-    args.total_samples //= world_size
-    assert args.model is not None, "Please provide a model name."
 
     tokenizer = get_tokenizer(args.model, args.revision, use_fast=args.tokenizer_use_fast)
+    print_rank_0("Getting base model")
     model = get_base_model(args.model, args.revision, args.dtype)
-    print("Model loaded with type ", next(iter(model.parameters())).dtype)
+    print_rank_0("Model loaded with type ", next(iter(model.parameters())).dtype)
 
-    out_path = Path(args.output_file)
-    print("Outputting to ", out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        out_path = Path(args.output_file)
+        print_rank_0("Outputting to ", out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     bins = torch.logspace(-8, np.log2(5), steps=250, dtype=torch.float32, base=2.0)
     bins = torch.cat([-torch.flip(bins, (0,)), torch.tensor([0.0]), bins])
-    torch.save(bins, Path(args.output_file).parent / "bins.pt")
+    if rank == 0:
+        torch.save(bins, Path(args.output_file).parent / "bins.pt")
     writer = await get_tensor_writer(
         model,
         bins,
@@ -231,13 +295,15 @@ async def main():
     )
 
     if args.fc1_pattern is None:
-        print("No pattern provided, find the name of the layer in this model")
-        print(model)
+        print_rank_0("No pattern provided, find the name of the layer in this model")
+        print_rank_0(model)
         return
 
-    model = model.to(device)
-    if dist.is_initialized():
-        model = FSDP(model)
+    print_rank_0("Wrapping model")
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+
+    model = FSDP(model, device_id=device, sync_module_states=True, cpu_offload=CPUOffload(True))
 
     num_layers = get_num_layers(model)
 
@@ -257,7 +323,7 @@ async def main():
                 outputs = model(input_ids=input_ids, attention_mask=attn_mask, labels=input_ids)
                 t.set_description(f"lm loss {outputs.loss:.2f}")
                 if outputs.loss > 6:
-                    print("Loss too high, bug")
+                    print_rank_0("Loss too high, bug")
                     return
                 instrumenter.step(n_samples)
             await instrumenter.flush()
