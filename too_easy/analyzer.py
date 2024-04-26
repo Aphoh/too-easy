@@ -17,8 +17,12 @@ def analyze_zarr(zarrs):
     for file in glob.glob(zarrs + "/*.zarr"):
         zarr_arrs.append(da.from_zarr(file))
         name = Path(file).stem
-        assert name[-1] == "m", "Expected 'm' as last character in name" 
-        xv.append(int(name[:-1]))
+        num = float(name[:-1])
+        if name[-1] == "m":
+            num *= 1e6
+        elif name[-1] == "b":
+            num *= 1e9
+        xv.append(num)
     bins = torch.load(Path(zarrs) / "bins.pt").numpy()
 
     by_xv = sorted(zip(xv, zarr_arrs), key=lambda x: x[0])
@@ -35,6 +39,12 @@ def make_plots(dask_array, xv, bins):
     gt0s = []
     for arr in dask_array:
         gt0s.append((da.sum(arr[:, b0_idx:]) / da.sum(arr)).compute())
+
+    with open("output-gt0-steps.csv", "w") as f:
+        f.write("Model size,Fraction of values > 0\n")
+        for x, gt0 in zip(xv, gt0s):
+            f.write(f"{x:.0f},{gt0:.4f}\n")
+
     plt.plot(xv, gt0s, marker="o")
     plt.xlabel("Model size")
     plt.xscale("log")
