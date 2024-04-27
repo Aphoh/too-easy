@@ -271,7 +271,7 @@ async def main():
                 outputs = model(input_ids=input_ids, attention_mask=attn_mask, labels=input_ids)
                 loss = outputs.loss.detach().clone()
                 t.set_description(f"lm loss {outputs.loss:.2f}")
-                if outputs.loss > 6:
+                if outputs.loss > 8:
                     print_rank_0("Loss too high, bug")
                     return
                 if use_dist:

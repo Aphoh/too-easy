@@ -85,7 +85,6 @@ class Instrumenter:
             i_module: torch.nn.Module = module[i]
             for ratt in rights:
                 i_module = getattr(i_module, ratt)
-            print("Registering hook for module", i_module)
 
             i_module.register_forward_hook(self._make_fwd_hook(i))
 
