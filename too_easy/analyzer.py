@@ -38,7 +38,9 @@ def make_plots(dask_array, xv, bins):
     b0_idx = np.where(bins == 0)[0][0]
     gt0s = []
     for arr in dask_array:
-        gt0s.append((da.sum(arr[:, b0_idx:]) / da.sum(arr)).compute())
+        total = da.sum(arr).compute()
+        gt0s.append((da.sum(arr[:, b0_idx:]) / total).compute())
+        print("TOTAL", total, "GT0", gt0s[-1])
 
     with open("output-gt0-steps.csv", "w") as f:
         f.write("Model size,Fraction of values > 0\n")

@@ -2,6 +2,7 @@ import argparse
 from instrumenter import Instrumenter
 from tensor_writer import TensorStoreWriter
 from datasets import load_dataset, load_from_disk, Dataset
+import os
 from torch.utils.data import DataLoader
 import psutil
 from accelerate import Accelerator
@@ -144,6 +145,8 @@ def get_instrumenter(
 
 
 def get_num_layers(model):
+    if hasattr(model, "module"):
+        model = model.module
     cfg = model.config
     if hasattr(cfg, "num_hidden_layers"):
         return cfg.num_hidden_layers
@@ -160,7 +163,9 @@ def get_max_context_length(model):
 
 
 async def main():
-    accelerator = Accelerator()
+    use_dist = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if use_dist:
+        accelerator = Accelerator()
     parser = argparse.ArgumentParser(
         description="Process a Hugging Face dataset with a given model."
     )
@@ -210,7 +215,8 @@ async def main():
         print_rank_0("Outputting to ", out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    bins = torch.logspace(-8, np.log2(5), steps=250, dtype=torch.float32, base=2.0)
+    bins = torch.logspace(-8, np.log2(25), steps=250, dtype=torch.float32, base=2.0)
+    bins = torch.cat([bins, torch.tensor([float("inf")])])
     bins = torch.cat([-torch.flip(bins, (0,)), torch.tensor([0.0]), bins])
     if get_rank() == 0:
         torch.save(bins, Path(args.output_file).parent / "bins.pt")
@@ -238,12 +244,19 @@ async def main():
 
     print_rank_0("Wrapping model")
 
-    model, dataloader = accelerator.prepare(model, dataloader)
+    if use_dist:
+        model, dataloader = accelerator.prepare(model, dataloader)
+
+    unwrapped_model = model
+    if hasattr(model, "module"):
+        unwrapped_model = model.module
 
     num_layers = get_num_layers(model)
+    loss_agg = 0.0
+    loss_count = 0
 
     with ThreadPoolExecutor() as pool:
-        instrumenter = get_instrumenter(model, pool, writer, args.fc1_pattern, num_layers, bins)
+        instrumenter = get_instrumenter(unwrapped_model, pool, writer, args.fc1_pattern, num_layers, bins)
         instrumenter.instrument()
         model.eval()
         with torch.inference_mode():
@@ -256,12 +269,20 @@ async def main():
                 else:
                     attn_mask = batch["attention_mask"]
                 outputs = model(input_ids=input_ids, attention_mask=attn_mask, labels=input_ids)
+                loss = outputs.loss.detach().clone()
                 t.set_description(f"lm loss {outputs.loss:.2f}")
                 if outputs.loss > 6:
                     print_rank_0("Loss too high, bug")
                     return
+                if use_dist:
+                    accelerator.reduce(loss, reduction="mean")
+                loss_agg += loss.item()
+                loss_count += 1
                 instrumenter.step(n_samples)
-                await instrumenter.flush()
+            await instrumenter.flush()
+    if get_rank() == 0:
+        with open(Path(args.output_file).parent / "losses.csv", "a") as f:
+            f.write(f"{args.output_file},{loss_agg / loss_count:.5f}\n")
 
 if __name__ == "__main__":
     asyncio.run(main())
