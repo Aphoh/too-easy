@@ -1,4 +1,4 @@
-from tensor_writer import TensorStoreWriter
+from .tensor_writer import TensorStoreWriter
 from torch import Tensor
 import torch
 import contextlib

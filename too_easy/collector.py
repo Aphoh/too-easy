@@ -1,6 +1,6 @@
 import argparse
-from instrumenter import Instrumenter
-from tensor_writer import TensorStoreWriter
+from .instrumenter import Instrumenter
+from .tensor_writer import TensorStoreWriter
 from datasets import load_dataset, load_from_disk, Dataset
 import os
 from torch.utils.data import DataLoader
@@ -87,8 +87,9 @@ def get_dataloader(
 
 async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     num_layers = get_num_layers(model)
+    ffn_size = model.config.intermediate_size
     ts = TensorStoreWriter(
-        path=output, layers=num_layers, output_shape=(bins.shape[0] - 1,), output_dtype="uint32"
+        path=output, layers=num_layers, output_shape=(ffn_size,), output_dtype="uint32", #output_dtype="float32"
     )
     await ts.init_tensorstore()
     return ts
@@ -109,22 +110,19 @@ def get_base_model(model_name: str, revision: str, dtype: str):
         "torch_dtype": getattr(torch, dtype),
     }
     dtype = getattr(torch, dtype)
-    #if get_rank() == 0:
-    #with init_empty_weights():
-    #    config = AutoConfig.from_pretrained(**kwargs)
-    #    return AutoModelForCausalLM.from_config(config).to(dtype) # huggingface is a dirty liar
     return AutoModelForCausalLM.from_pretrained(**kwargs, low_cpu_mem_usage=True).to(dtype)
 
 
-def histogram_transform(bins: torch.Tensor):
+def histogram_transform(bins: torch.Tensor, thresh=0.0):
     def closure(tensor: torch.Tensor):
         try:
             if tensor.device.type == "cuda":
                 torch.cuda.synchronize(tensor.device)
-            res = torchist.histogram(tensor, edges=bins)
+            #res = tensor.abs().view(-1, tensor.shape[-1]).sum(dim=0)
+            res = (tensor > thresh).view(-1, tensor.shape[-1]).sum(dim=0)
         except Exception as e:
             print_rank_0(e)
-            return torch.zeros(bins.shape[0] - 1)
+            return torch.zeros(tensor.shape[-1])
         return res
 
     return closure
@@ -172,11 +170,11 @@ async def main():
     parser.add_argument(
         "--dset",
         type=str,
-        default="mli-will/long-c4-hq-subset",
+        default="mit-han-lab/pile-val-backup",
         help="Hugging Face dataset to process.",
     )
     parser.add_argument(
-        "--dset-split", default="data", type=str, help="The split of the dataset to use."
+        "--dset-split", default="validation", type=str, help="The split of the dataset to use."
     )
     parser.add_argument(
         "--dset-cache-path", type=str, default=None, help="The cache path for the dataset."
