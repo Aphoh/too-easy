@@ -46,7 +46,7 @@ def get_dataloader(
 ):
     tokenizer.add_tokens("<custom padding>")
     tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("<custom padding>")
-    t = time.time() 
+    t = time.time()
     if Path(save_path).exists():
         dset = load_from_disk(save_path)
     else:
@@ -67,7 +67,7 @@ def get_dataloader(
             )
         if rank == 0:
             print("Saving dataset to disk")
-            dset.save_to_disk(save_path) 
+            dset.save_to_disk(save_path)
 
     dset.set_format("torch")
     if world_size > 1:
@@ -116,27 +116,14 @@ def main():
         args.dset_already_tokenized = True
         context_length = 64
         text_field = "tokens"
-    
+
     if args.dset_save_path is None:
         args.dset_save_path = args.dset.split("/")[-1]
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    attn_impl = "eager"
-    try:
-        import flash_attn
-        attn_impl = "flash_attention_2"
-    except ImportError:
-        print("Flash attention not found. Using default attention")
-        pass
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, revision=args.revision, torch_dtype=getattr(torch, args.dtype), attn_implementation=attn_impl,
-    )
 
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     if world_size > 1 and torch.cuda.is_available():
         dist.init_process_group("gloo", rank=rank, world_size=world_size)
-
     device = None
     if args.device:
         device = args.device
@@ -146,10 +133,28 @@ def main():
             device = f"cuda:{rank}"
         elif torch.backends.mps.is_available():
             device = "mps"
+    print("Using device: ", device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    attn_impl = "eager"
+    if device == "cuda" and (args.dtype == "float16" or args.dtype == "bfloat16"):
+        try:
+            import flash_attn
+
+            attn_impl = "flash_attention_2"
+        except ImportError:
+            print("Flash attention not found. Using default attention")
+            pass
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        revision=args.revision,
+        torch_dtype=getattr(torch, args.dtype),
+        attn_implementation=attn_impl,
+    )
+
     model = model.to(device)
     model.eval()
-    #model = torch.compile(model)
-    
+    # model = torch.compile(model)
+
     if args.batch_size is None:
         if "cuda" in device:
             memory = torch.cuda.get_device_properties(0).total_memory
@@ -183,7 +188,7 @@ def main():
             outputs = model(**{k: v.to(device) for k, v in elem.items()})
             loss = outputs.loss.cpu().float()
             total_loss += loss
-            total_loss_sq += loss ** 2
+            total_loss_sq += loss**2
             if num_samples >= args.total_samples:
                 break
 
@@ -191,15 +196,13 @@ def main():
         dist.all_reduce(total_loss)
         dist.all_reduce(total_loss_sq)
         dist.all_reduce(num_samples)
-    if rank == 1:
+    if rank == 0:
         res = (total_loss / num_samples).cpu().item()
         res2 = (total_loss_sq / num_samples).cpu().item()
         print("Mean loss: ", res)
 
         with open(args.output_file, "a") as f:
-            f.write(
-                f"{args.model},{args.revision},{args.dset},{res},{res2}\n"
-            )
+            f.write(f"{args.model},{args.revision},{args.dset},{res},{res2}\n")
 
 
 if __name__ == "__main__":

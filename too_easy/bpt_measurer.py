@@ -2,12 +2,15 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from argparse import ArgumentParser
 
+
 def get_tokenizer(model: str, revision: str, use_fast: bool = True):
     return AutoTokenizer.from_pretrained(model, revision=revision, use_fast=use_fast)
+
 
 def get_dataset(path, split):
     dset = load_dataset(path, split=split, streaming=True)
     return dset
+
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -41,10 +44,27 @@ if __name__ == "__main__":
                 prev_tpb = next_tpb
             else:
                 with open(args.output_path, "a") as f:
-                    output_vals = [args.model, args.revision, args.dset, args.split, args.eps, args.add_special_tokens, n_bytes, n_tokens, next_tpb]
+                    output_vals = [
+                        args.model,
+                        args.revision,
+                        args.dset,
+                        args.split,
+                        args.eps,
+                        args.add_special_tokens,
+                        n_bytes,
+                        n_tokens,
+                        next_tpb,
+                    ]
                     f.write(",".join(map(str, output_vals)) + "\n")
                     break
             acc = 0
 
-    print("Final TBP: ", n_tokens / n_bytes, "After processing", n_bytes, "bytes and", n_tokens, "tokens")
-
+    print(
+        "Final TBP: ",
+        n_tokens / n_bytes,
+        "After processing",
+        n_bytes,
+        "bytes and",
+        n_tokens,
+        "tokens",
+    )

@@ -17,13 +17,16 @@ import torch.distributed as dist
 import numpy as np
 from typing import Optional
 
+
 def get_rank():
     return dist.get_rank() if dist.is_initialized() else 0
+
 
 def print_rank_0(*args, **kwargs):
     if get_rank() == 0:
         mem = psutil.virtual_memory()[2]
         print(f"CPU: {mem}%", *args, **kwargs)
+
 
 def get_tokenizer(model: str, revision: str, use_fast: bool = True):
     if "opt" in model.lower() and use_fast:
@@ -73,7 +76,7 @@ def get_dataloader(
         if cache_path:
             dset.save_to_disk(cache_path)
 
-    if dist.is_initialized(): 
+    if dist.is_initialized():
         dist.barrier()
 
     if dset is None:
@@ -89,10 +92,14 @@ async def get_tensor_writer(model, bins: torch.Tensor, output: Path):
     num_layers = get_num_layers(model)
     ffn_size = model.config.intermediate_size
     ts = TensorStoreWriter(
-        path=output, layers=num_layers, output_shape=(ffn_size,), output_dtype="uint32", #output_dtype="float32"
+        path=output,
+        layers=num_layers,
+        output_shape=(ffn_size,),
+        output_dtype="uint32",  # output_dtype="float32"
     )
     await ts.init_tensorstore()
     return ts
+
 
 def get_base_model(model_name: str, revision: str, dtype: str):
     attn_impl = "eager"
@@ -118,7 +125,7 @@ def histogram_transform(bins: torch.Tensor, thresh=0.0):
         try:
             if tensor.device.type == "cuda":
                 torch.cuda.synchronize(tensor.device)
-            #res = tensor.abs().view(-1, tensor.shape[-1]).sum(dim=0)
+            # res = tensor.abs().view(-1, tensor.shape[-1]).sum(dim=0)
             res = (tensor > thresh).view(-1, tensor.shape[-1]).sum(dim=0)
         except Exception as e:
             print_rank_0(e)
@@ -161,9 +168,7 @@ def get_max_context_length(model):
 
 
 async def main():
-    use_dist = int(os.environ.get("WORLD_SIZE", "1")) > 1
-    if use_dist:
-        accelerator = Accelerator()
+    accelerator = Accelerator()
     parser = argparse.ArgumentParser(
         description="Process a Hugging Face dataset with a given model."
     )
@@ -199,6 +204,9 @@ async def main():
         action="store_false",
         dest="tokenizer_use_fast",
         help="Use the fast tokenizer.",
+    )
+    parser.add_argument(
+        "--npy-output", type=str, help="Write a file with the numpy output.", default=None
     )
 
     args, _ = parser.parse_known_args()
@@ -242,8 +250,7 @@ async def main():
 
     print_rank_0("Wrapping model")
 
-    if use_dist:
-        model, dataloader = accelerator.prepare(model, dataloader)
+    model, dataloader = accelerator.prepare(model, dataloader)
 
     unwrapped_model = model
     if hasattr(model, "module"):
@@ -252,15 +259,18 @@ async def main():
     num_layers = get_num_layers(model)
     loss_agg = 0.0
     loss_count = 0
+    samples = 0
 
     with ThreadPoolExecutor() as pool:
-        instrumenter = get_instrumenter(unwrapped_model, pool, writer, args.fc1_pattern, num_layers, bins)
-        instrumenter.instrument()
+        instrumenter = get_instrumenter(
+            unwrapped_model, pool, writer, args.fc1_pattern, num_layers, bins
+        )
+        # instrumenter.instrument()
         model.eval()
         with torch.inference_mode():
             t = tqdm(dataloader, desc="Processing ", disable=(get_rank() != 0))
             for batch in t:
-                n_samples = batch["input_ids"].shape[0]
+                samples += batch["input_ids"].numel()
                 input_ids = batch["input_ids"]
                 if "attention_mask" not in batch:
                     attn_mask = torch.ones_like(input_ids, device=input_ids.device)
@@ -272,15 +282,19 @@ async def main():
                 if outputs.loss > 8:
                     print_rank_0("Loss too high, bug")
                     return
-                if use_dist:
-                    accelerator.reduce(loss, reduction="mean")
+                accelerator.reduce(loss, reduction="mean")
                 loss_agg += loss.item()
                 loss_count += 1
-                instrumenter.step(n_samples)
+                instrumenter.step(batch["input_ids"].shape[0])
             await instrumenter.flush()
     if get_rank() == 0:
         with open(Path(args.output_file).parent / "losses.csv", "a") as f:
             f.write(f"{args.output_file},{loss_agg / loss_count:.5f}\n")
+
+    if args.npy_output:
+        Path(args.npy_output).parent.mkdir(parents=True, exist_ok=True)
+        np.save(Path(args.npy_output), writer.ts_arr[:] / samples)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

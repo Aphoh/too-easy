@@ -16,7 +16,7 @@ class TensorStoreWriter:
         self.path = path
         self.layers = layers
         if isinstance(output_shape, int):
-            output_shape = (output_shape,) 
+            output_shape = (output_shape,)
         self.output_shape = output_shape
         self.ts_arr_shape = [layers] + list(output_shape)
         self.output_dtype: ts.dtype = getattr(ts, output_dtype, None)
@@ -33,8 +33,8 @@ class TensorStoreWriter:
             {
                 "driver": "zarr",
                 "kvstore": {"driver": "file", "path": str(self.path)},
-                "metadata": { #TODO: should we allow for chunking in args?
-                    "chunks": self.ts_arr_shape, 
+                "metadata": {  # TODO: should we allow for chunking in args?
+                    "chunks": self.ts_arr_shape,
                 },
             },
             open=True,
