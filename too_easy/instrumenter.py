@@ -1,11 +1,14 @@
-from .tensor_writer import TensorStoreWriter
-from torch import Tensor
-import torch
-import contextlib
-from asyncio import AbstractEventLoop
-from concurrent.futures import ThreadPoolExecutor
-import torch.distributed as dist
 import asyncio
+import contextlib
+from asyncio import AbstractEventLoop, Future
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, List
+
+import torch
+import torch.distributed as dist
+from torch import Tensor
+
+from .tensor_writer import TensorStoreWriter
 
 
 class Writeable:
@@ -21,7 +24,8 @@ class Writeable:
         if isinstance(self.stream, torch.cuda.Stream):
             self.stream.synchronize()
 
-        writer.write_layer_tensor(self.layer, self.tensor)
+        converted = writer.convert_tensor(self.tensor)
+        writer.ts_arr[self.layer] += converted
         del self.tensor
         del self.stream
 
@@ -30,7 +34,7 @@ class Instrumenter:
     def __init__(
         self,
         model,
-        layer_transform: callable,
+        layer_transform: Callable,
         loop: AbstractEventLoop,
         pool: ThreadPoolExecutor,
         writer: TensorStoreWriter,
@@ -44,7 +48,7 @@ class Instrumenter:
         self.loop = loop
         self.pool = pool
         self.writer = writer
-        self.write_handles = []
+        self.write_handles: List[Future[Any]] = []
         self._init_streams()
 
     def _init_streams(self):
@@ -68,9 +72,7 @@ class Instrumenter:
                     dist.all_reduce(output)
                 if not dist.is_initialized() or dist.get_rank() == 0:
                     w = Writeable(layer, output.to("cpu", non_blocking=True), stream)
-                    self.write_handles.append(
-                        self.loop.run_in_executor(self.pool, w.flush, self.writer)
-                    )
+                    self.write_handles.append(self.loop.run_in_executor(self.pool, w.flush, self.writer))
 
         return i_fwd_hook
 

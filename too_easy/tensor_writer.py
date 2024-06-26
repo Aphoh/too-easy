@@ -1,6 +1,7 @@
+from pathlib import Path
+
 import tensorstore as ts
 import torch
-from pathlib import Path
 
 
 class TensorStoreWriter:
@@ -10,15 +11,13 @@ class TensorStoreWriter:
 
         Parameters:
         - path: The file path for the tensor store.
-        - layers: The number of layers in the tensor.
-        - output_sahpe: The shape of the output tensor.
+        - output_shape: The shape of the output tensor.
         """
         self.path = path
         self.layers = layers
         if isinstance(output_shape, int):
             output_shape = (output_shape,)
-        self.output_shape = output_shape
-        self.ts_arr_shape = [layers] + list(output_shape)
+        self.ts_arr_shape = list(output_shape)
         self.output_dtype: ts.dtype = getattr(ts, output_dtype, None)
         if self.output_dtype is None:
             raise ValueError(f"Invalid tensorstore output dtype: {output_dtype}")
@@ -43,12 +42,5 @@ class TensorStoreWriter:
             dtype=self.output_dtype,
         )
 
-    def write_layer_tensor(self, layer: int, tensor: torch.Tensor):
-        """
-        Writes a tensor to the TensorStore array at the specified block index.
-
-        Parameters:
-        - tensor: The tensor to write, should be size [n_bins]
-        """
-        tensor = tensor.numpy().astype(self.output_dtype.numpy_dtype)
-        self.ts_arr[layer] += tensor
+    def convert_tensor(self, tensor: torch.Tensor):
+        return tensor.numpy().astype(self.output_dtype.numpy_dtype)

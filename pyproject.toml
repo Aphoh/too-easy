@@ -80,7 +80,7 @@ too_easy = ["py.typed"]
 version = {attr = "too_easy.version.VERSION"}
 
 [tool.black]
-line-length = 100
+line-length = 119
 include = '\.pyi?$'
 exclude = '''
 (
@@ -94,7 +94,6 @@ exclude = '''
     | \bdoc\b
 )
 '''
-required_version = "24.2.0"
 
 [tool.isort]
 profile = "black"
