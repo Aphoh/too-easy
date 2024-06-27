@@ -87,14 +87,9 @@ def get_dataloader(
     return DataLoader(dset, batch_size=batch_size)
 
 
-async def get_tensor_writer(model, output_shape, output: Path):
+async def get_tensor_writer(model, output_shape, output: Path, output_dtype: str = "uint32"):
     num_layers = get_num_layers(model)
-    ts = TensorStoreWriter(
-        path=output,
-        layers=num_layers,
-        output_shape=output_shape,
-        output_dtype="uint32",  # output_dtype="float32"
-    )
+    ts = TensorStoreWriter(path=output, layers=num_layers, output_shape=output_shape, output_dtype=output_dtype)
     await ts.init_tensorstore()
     return ts
 
@@ -136,7 +131,7 @@ def get_max_context_length(model):
     raise ValueError("Cannot find the maximum context length in the model")
 
 
-async def setup(description):
+def setup(description):
     accelerator = Accelerator()
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(

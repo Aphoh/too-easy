@@ -43,4 +43,5 @@ class TensorStoreWriter:
         )
 
     def convert_tensor(self, tensor: torch.Tensor):
+        assert "cpu" in tensor.device.type, "Tensor must be on CPU"
         return tensor.numpy().astype(self.output_dtype.numpy_dtype)

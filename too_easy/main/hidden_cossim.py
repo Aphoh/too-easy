@@ -3,7 +3,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn.functional import cosine_similarity
 from tqdm import tqdm
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from too_easy.common import (
     get_base_model,
@@ -32,13 +34,6 @@ async def main():
         print_rank_0("Outputting to ", out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    num_layers = get_num_layers(model)
-    writer = await get_tensor_writer(
-        model,
-        output_shape=(num_layers,),
-        output=Path(args.output_file),
-    )
-
     context_length = get_max_context_length(model)
     dataloader = get_dataloader(
         args.dset,
@@ -50,12 +45,13 @@ async def main():
         total_samples=args.total_samples,
     )
 
-    if args.fc1_pattern is None:
-        print_rank_0("No pattern provided, find the name of the layer in this model")
-        print_rank_0(model)
-        return
-
-    print_rank_0("Wrapping model")
+    num_layers = get_num_layers(model)
+    writer = await get_tensor_writer(
+        model,
+        output_shape=(num_layers, args.total_samples, context_length),
+        output=Path(args.output_file),
+        output_dtype="float32",
+    )
 
     model, dataloader = accelerator.prepare(model, dataloader)
 
@@ -63,21 +59,28 @@ async def main():
     loss_count = 0
     samples = 0
 
+    curr_elem = 0
     model.eval()
     with torch.inference_mode():
         t = tqdm(dataloader, desc="Processing ", disable=(get_rank() != 0))
-        for batch in t:
+        for i, batch in enumerate(t):
             samples += batch["input_ids"].numel()
             input_ids = batch["input_ids"]
             if "attention_mask" not in batch:
                 attn_mask = torch.ones_like(input_ids, device=input_ids.device)
             else:
                 attn_mask = batch["attention_mask"]
-            outputs = model(
+            outputs: CausalLMOutputWithPast = model(
                 input_ids=input_ids,
                 attention_mask=attn_mask,
                 labels=input_ids,
+                output_hidden_states=True,
             )
+            hs = torch.stack(outputs.hidden_states)
+            ssims = cosine_similarity(hs[1:], hs[:-1], dim=-1).cpu()
+            writer.ts_arr[:, curr_elem : curr_elem + input_ids.shape[0], :] = writer.convert_tensor(ssims)
+            curr_elem += input_ids.shape[0]
+
             loss = outputs.loss.detach().clone()
             t.set_description(f"lm loss {outputs.loss:.2f}")
             if outputs.loss > 8:
